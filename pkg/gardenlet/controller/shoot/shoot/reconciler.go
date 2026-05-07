@@ -6,6 +6,7 @@ package shoot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -120,6 +121,10 @@ func (r *Reconciler) reconcileShoot(ctx context.Context, log logr.Logger, shoot 
 		formerRetryCycleStartTime = shoot.Status.RetryCycleStartTime.DeepCopy()
 	}
 
+	if err := r.ensureStagedSpec(ctx, log, shoot); err != nil {
+		return reconcile.Result{}, err
+	}
+
 	o, result, err := r.prepareOperation(ctx, log, shoot)
 	if err != nil || o == nil {
 		return result, err
@@ -160,6 +165,100 @@ func (r *Reconciler) reconcileShoot(ctx context.Context, log logr.Logger, shoot 
 
 	log.Info("Shoot operation finished successfully, scheduling next reconciliation for Shoot", "requeueAfter", result.RequeueAfter, "nextReconciliation", nextReconciliation)
 	return result, nil
+}
+
+const (
+	stagedSpecConfigMapDataKey    = "spec"
+	stagedSpecAppliedAnnotation   = "gardener.cloud/staged-spec-applied"
+)
+
+func stagedSpecConfigMapName(shootName string) string {
+	return "shoot-" + shootName + "-staged-spec"
+}
+
+func (r *Reconciler) ensureStagedSpec(ctx context.Context, log logr.Logger, shoot *gardencorev1beta1.Shoot) error {
+	if !v1beta1helper.ShootConfinesSpecUpdateRollout(shoot.Spec.Maintenance) {
+		return nil
+	}
+
+	configMap := &corev1.ConfigMap{}
+	configMapKey := client.ObjectKey{Namespace: shoot.Namespace, Name: stagedSpecConfigMapName(shoot.Name)}
+	if err := r.GardenClient.Get(ctx, configMapKey, configMap); err != nil {
+		if apierrors.IsNotFound(err) {
+			return r.createStagedSpecConfigMap(ctx, log, shoot)
+		}
+		return fmt.Errorf("error retrieving staged spec ConfigMap: %w", err)
+	}
+
+	if _, applied := configMap.Annotations[stagedSpecAppliedAnnotation]; applied {
+		return nil
+	}
+
+	if !gardenerutils.IsNowInEffectiveShootMaintenanceTimeWindow(shoot, r.Clock) {
+		return nil
+	}
+
+	return r.applyStagedSpec(ctx, log, shoot, configMap)
+}
+
+func (r *Reconciler) createStagedSpecConfigMap(ctx context.Context, log logr.Logger, shoot *gardencorev1beta1.Shoot) error {
+	specJSON, err := json.Marshal(shoot.Spec)
+	if err != nil {
+		return fmt.Errorf("failed to marshal current Shoot spec: %w", err)
+	}
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      stagedSpecConfigMapName(shoot.Name),
+			Namespace: shoot.Namespace,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(shoot, gardencorev1beta1.SchemeGroupVersion.WithKind("Shoot")),
+			},
+		},
+		Data: map[string]string{
+			stagedSpecConfigMapDataKey: string(specJSON),
+		},
+	}
+
+	if err := r.GardenClient.Create(ctx, configMap); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to create staged spec ConfigMap: %w", err)
+	}
+
+	log.Info("Created staged spec ConfigMap with current Shoot spec")
+	return nil
+}
+
+func (r *Reconciler) applyStagedSpec(ctx context.Context, log logr.Logger, shoot *gardencorev1beta1.Shoot, configMap *corev1.ConfigMap) error {
+	specJSON, ok := configMap.Data[stagedSpecConfigMapDataKey]
+	if !ok {
+		log.Error(nil, "Staged spec ConfigMap does not contain the expected key", "key", stagedSpecConfigMapDataKey)
+		return nil
+	}
+
+	var stagedSpec gardencorev1beta1.ShootSpec
+	if err := json.Unmarshal([]byte(specJSON), &stagedSpec); err != nil {
+		log.Error(err, "Failed to unmarshal staged spec from ConfigMap")
+		return nil
+	}
+
+	patch := client.MergeFrom(shoot.DeepCopy())
+	shoot.Spec = stagedSpec
+	if err := r.GardenClient.Patch(ctx, shoot, patch); err != nil {
+		return fmt.Errorf("failed to apply staged spec to Shoot: %w", err)
+	}
+
+	log.Info("Applied staged spec from ConfigMap to Shoot")
+
+	cmPatch := client.MergeFrom(configMap.DeepCopy())
+	metav1.SetMetaDataAnnotation(&configMap.ObjectMeta, stagedSpecAppliedAnnotation, r.Clock.Now().UTC().Format(time.RFC3339))
+	if err := r.GardenClient.Patch(ctx, configMap, cmPatch); err != nil {
+		return fmt.Errorf("failed to annotate staged spec ConfigMap as applied: %w", err)
+	}
+
+	return nil
 }
 
 func (r *Reconciler) migrateShoot(ctx context.Context, log logr.Logger, shoot *gardencorev1beta1.Shoot) (reconcile.Result, error) {

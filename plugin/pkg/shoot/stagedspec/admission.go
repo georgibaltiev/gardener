@@ -63,17 +63,19 @@ func (s *StagedSpec) Validate(ctx context.Context, a admission.Attributes, _ adm
 		return apierrors.NewInternalError(errors.New("could not convert old resource into Shoot object"))
 	}
 
-	if !isConfineSpecUpdateRolloutEnabled(newShoot) {
+	if !isConfineSpecUpdateRolloutEnabled(oldShoot) {
 		return nil
 	}
-
-	// TODO (georgibaltiev): handle special cases regarding the modification of hibernation, maintenance window and the actual confineSpecUpdateRollout field.
 
 	if apiequality.Semantic.DeepEqual(oldShoot.Spec, newShoot.Spec) {
 		return nil
 	}
 
-	if isGardenlet(a) {
+	if onlyAllowedFieldsChanged(&oldShoot.Spec, &newShoot.Spec) {
+		return nil
+	}
+
+	if isInternalActor(a) {
 		return nil
 	}
 
@@ -90,7 +92,29 @@ func isConfineSpecUpdateRolloutEnabled(shoot *core.Shoot) bool {
 		*shoot.Spec.Maintenance.ConfineSpecUpdateRollout
 }
 
-func isGardenlet(a admission.Attributes) bool {
+func onlyAllowedFieldsChanged(oldSpec, newSpec *core.ShootSpec) bool {
+	oldCopy := oldSpec.DeepCopy()
+	newCopy := newSpec.DeepCopy()
+
+	// Normalize fields that are always allowed to change
+	normalizeAllowedFields(oldCopy)
+	normalizeAllowedFields(newCopy)
+
+	return apiequality.Semantic.DeepEqual(oldCopy, newCopy)
+}
+
+func normalizeAllowedFields(spec *core.ShootSpec) {
+	// Hibernation.Enabled changes are always allowed (immediate rollout exception)
+	if spec.Hibernation == nil {
+		spec.Hibernation = &core.Hibernation{}
+	}
+	spec.Hibernation.Enabled = nil
+
+	// Maintenance changes are always allowed (administrative, not spec-rollout)
+	spec.Maintenance = nil
+}
+
+func isInternalActor(a admission.Attributes) bool {
 	userInfo := a.GetUserInfo()
 	if userInfo == nil {
 		return false
@@ -100,5 +124,10 @@ func isGardenlet(a admission.Attributes) bool {
 		return true
 	}
 
-	return strings.HasPrefix(userInfo.GetName(), v1beta1constants.SeedUserNamePrefix)
+	if strings.HasPrefix(userInfo.GetName(), v1beta1constants.SeedUserNamePrefix) {
+		return true
+	}
+
+	// Allow service accounts (internal controllers like gardener-controller-manager)
+	return strings.HasPrefix(userInfo.GetName(), "system:serviceaccount:")
 }

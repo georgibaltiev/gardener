@@ -64,8 +64,8 @@ var _ = Describe("StagedSpec", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("should allow if confineSpecUpdateRollout is nil", func() {
-			shoot.Spec.Maintenance.ConfineSpecUpdateRollout = nil
+		It("should allow if confineSpecUpdateRollout was not enabled on old Shoot", func() {
+			oldShoot.Spec.Maintenance.ConfineSpecUpdateRollout = nil
 			shoot.Spec.Kubernetes.Version = "1.29.0"
 			attrs := admission.NewAttributesRecord(shoot, oldShoot, core.Kind("Shoot").WithVersion("version"), shoot.Namespace, shoot.Name, core.Resource("shoots").WithVersion("version"), "", admission.Update, &metav1.UpdateOptions{}, false, &user.DefaultInfo{Name: "user"})
 
@@ -73,8 +73,18 @@ var _ = Describe("StagedSpec", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("should allow if confineSpecUpdateRollout is false", func() {
-			shoot.Spec.Maintenance.ConfineSpecUpdateRollout = ptr.To(false)
+		It("should allow if confineSpecUpdateRollout was false on old Shoot", func() {
+			oldShoot.Spec.Maintenance.ConfineSpecUpdateRollout = ptr.To(false)
+			shoot.Spec.Kubernetes.Version = "1.29.0"
+			attrs := admission.NewAttributesRecord(shoot, oldShoot, core.Kind("Shoot").WithVersion("version"), shoot.Namespace, shoot.Name, core.Resource("shoots").WithVersion("version"), "", admission.Update, &metav1.UpdateOptions{}, false, &user.DefaultInfo{Name: "user"})
+
+			err := plugin.Validate(ctx, attrs, nil)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should allow enabling confineSpecUpdateRollout together with other spec changes", func() {
+			oldShoot.Spec.Maintenance.ConfineSpecUpdateRollout = ptr.To(false)
+			shoot.Spec.Maintenance.ConfineSpecUpdateRollout = ptr.To(true)
 			shoot.Spec.Kubernetes.Version = "1.29.0"
 			attrs := admission.NewAttributesRecord(shoot, oldShoot, core.Kind("Shoot").WithVersion("version"), shoot.Namespace, shoot.Name, core.Resource("shoots").WithVersion("version"), "", admission.Update, &metav1.UpdateOptions{}, false, &user.DefaultInfo{Name: "user"})
 
@@ -83,6 +93,25 @@ var _ = Describe("StagedSpec", func() {
 		})
 
 		It("should allow if the spec has not changed", func() {
+			attrs := admission.NewAttributesRecord(shoot, oldShoot, core.Kind("Shoot").WithVersion("version"), shoot.Namespace, shoot.Name, core.Resource("shoots").WithVersion("version"), "", admission.Update, &metav1.UpdateOptions{}, false, &user.DefaultInfo{Name: "user"})
+
+			err := plugin.Validate(ctx, attrs, nil)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should allow if only spec.hibernation.enabled changed", func() {
+			shoot.Spec.Hibernation = &core.Hibernation{Enabled: ptr.To(true)}
+			attrs := admission.NewAttributesRecord(shoot, oldShoot, core.Kind("Shoot").WithVersion("version"), shoot.Namespace, shoot.Name, core.Resource("shoots").WithVersion("version"), "", admission.Update, &metav1.UpdateOptions{}, false, &user.DefaultInfo{Name: "user"})
+
+			err := plugin.Validate(ctx, attrs, nil)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should allow if only maintenance fields changed", func() {
+			shoot.Spec.Maintenance.TimeWindow = &core.MaintenanceTimeWindow{
+				Begin: "020000+0000",
+				End:   "040000+0000",
+			}
 			attrs := admission.NewAttributesRecord(shoot, oldShoot, core.Kind("Shoot").WithVersion("version"), shoot.Namespace, shoot.Name, core.Resource("shoots").WithVersion("version"), "", admission.Update, &metav1.UpdateOptions{}, false, &user.DefaultInfo{Name: "user"})
 
 			err := plugin.Validate(ctx, attrs, nil)
@@ -110,6 +139,17 @@ var _ = Describe("StagedSpec", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
+		It("should allow if the request comes from a service account (internal controller)", func() {
+			shoot.Spec.Kubernetes.Version = "1.29.0"
+			attrs := admission.NewAttributesRecord(shoot, oldShoot, core.Kind("Shoot").WithVersion("version"), shoot.Namespace, shoot.Name, core.Resource("shoots").WithVersion("version"), "", admission.Update, &metav1.UpdateOptions{}, false, &user.DefaultInfo{
+				Name:   "system:serviceaccount:garden:gardener-controller-manager",
+				Groups: []string{"system:serviceaccounts", "system:serviceaccounts:garden"},
+			})
+
+			err := plugin.Validate(ctx, attrs, nil)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
 		It("should reject if spec changed and user is not a gardenlet", func() {
 			shoot.Spec.Kubernetes.Version = "1.29.0"
 			attrs := admission.NewAttributesRecord(shoot, oldShoot, core.Kind("Shoot").WithVersion("version"), shoot.Namespace, shoot.Name, core.Resource("shoots").WithVersion("version"), "", admission.Update, &metav1.UpdateOptions{}, false, &user.DefaultInfo{Name: "user@example.com"})
@@ -119,6 +159,18 @@ var _ = Describe("StagedSpec", func() {
 			Expect(err.Error()).To(ContainSubstring("confineSpecUpdateRollout"))
 			Expect(err.Error()).To(ContainSubstring("shoot-my-shoot-staged-spec"))
 			Expect(err.Error()).To(ContainSubstring("garden-my-project"))
+		})
+
+		It("should reject if hibernation schedules changed (not just enabled)", func() {
+			shoot.Spec.Hibernation = &core.Hibernation{
+				Enabled:   ptr.To(true),
+				Schedules: []core.HibernationSchedule{{Start: ptr.To("0 8 * * *")}},
+			}
+			attrs := admission.NewAttributesRecord(shoot, oldShoot, core.Kind("Shoot").WithVersion("version"), shoot.Namespace, shoot.Name, core.Resource("shoots").WithVersion("version"), "", admission.Update, &metav1.UpdateOptions{}, false, &user.DefaultInfo{Name: "user@example.com"})
+
+			err := plugin.Validate(ctx, attrs, nil)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("confineSpecUpdateRollout"))
 		})
 	})
 })
