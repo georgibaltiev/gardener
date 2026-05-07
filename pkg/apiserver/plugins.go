@@ -31,6 +31,7 @@ import (
 	shootnodelocaldns "github.com/gardener/gardener/plugin/pkg/shoot/nodelocaldns"
 	shootquotavalidator "github.com/gardener/gardener/plugin/pkg/shoot/quotavalidator"
 	shootresourcereservation "github.com/gardener/gardener/plugin/pkg/shoot/resourcereservation"
+	shootstagedspec "github.com/gardener/gardener/plugin/pkg/shoot/stagedspec"
 	shoottolerationrestriction "github.com/gardener/gardener/plugin/pkg/shoot/tolerationrestriction"
 	shootvalidator "github.com/gardener/gardener/plugin/pkg/shoot/validator"
 	shootvpa "github.com/gardener/gardener/plugin/pkg/shoot/vpa"
@@ -53,6 +54,7 @@ func RegisterAllAdmissionPlugins(plugins *admission.Plugins) {
 	shootdnsrewriting.Register(plugins)
 	shootmutator.Register(plugins)
 	shootvalidator.Register(plugins)
+	shootstagedspec.Register(plugins)
 	seedvalidator.Register(plugins)
 	seedmutator.Register(plugins)
 	controllerregistrationresources.Register(plugins)
